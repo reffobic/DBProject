@@ -1,0 +1,12 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.so
+.DS_Store
+.env
+.env.*
+export_csv/
+*.log
