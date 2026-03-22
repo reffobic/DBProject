@@ -9,4 +9,5 @@ __pycache__/
 .env
 .env.*
 export_csv/
+processed_ids.txt
 *.log

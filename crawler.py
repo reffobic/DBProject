@@ -12,6 +12,8 @@ Environment variables (optional defaults in parentheses):
   CRAWL_MAX_PAGES (100)     — catalog pages to fetch
   USERS_CSV (users.csv)
   EXPORT_CSV_DIR (export_csv) — set empty to skip CSV export after crawl
+  PROCESSED_IDS_FILE (processed_ids.txt) — set empty to disable resume checkpointing
+  ORG_CONTACT_MAX_LEN (45) — raise to 65535 after sql/alter_organization_contact_to_text.sql
 
 Also supports CKAN-style identifiers in dataset URLs: /dataset/<id>
 """
@@ -27,7 +29,7 @@ import sys
 import time
 from datetime import datetime
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 import mysql.connector
 import requests
@@ -53,6 +55,42 @@ def env_int(name: str, default: int) -> int:
     if v is None or v == "":
         return default
     return int(v)
+
+
+def env_str(name: str, default: str) -> str:
+    v = os.environ.get(name)
+    return default if v is None else v
+
+
+def org_contact_max_len() -> int:
+    return env_int("ORG_CONTACT_MAX_LEN", 45)
+
+
+def resume_ids_path() -> str | None:
+    p = env_str("PROCESSED_IDS_FILE", "processed_ids.txt").strip()
+    return p if p else None
+
+
+def load_processed_ids(path: str) -> set[str]:
+    ids: set[str] = set()
+    if not os.path.isfile(path):
+        return ids
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                ids.add(line)
+    return ids
+
+
+def append_processed_id(path: str, dataset_id: str) -> None:
+    with open(path, "a", encoding="utf-8") as fa:
+        fa.write(dataset_id + "\n")
+        fa.flush()
+        try:
+            os.fsync(fa.fileno())
+        except OSError:
+            pass
 
 
 def sleep_polite() -> None:
@@ -170,19 +208,75 @@ def parse_catalog_listing(html: str) -> list[dict[str, Any]]:
     return out
 
 
-def _breadcrumb_org(soup: BeautifulSoup) -> tuple[str | None, str | None]:
-    main = soup.select_one('div[role="main"]') or soup
-    slug, display = None, None
-    for a in main.select('ol.breadcrumb a[href^="/organization/"]'):
-        href = (a.get("href") or "").rstrip("/")
-        if href == "/organization" or href.endswith("/organization"):
-            continue
-        parts = href.split("/")
-        if len(parts) < 2:
-            continue
-        slug = parts[-1]
-        display = a.get_text(strip=True) or None
-    return slug, display
+def _organization_slug_from_href(href: str) -> str | None:
+    href = (href or "").strip()
+    if "?" in href:
+        return None
+    path = href.split("?")[0].rstrip("/")
+    if path in ("/organization", ""):
+        return None
+    if not path.startswith("/organization/"):
+        return None
+    slug = path.split("/")[-1]
+    return slug if slug and slug != "organization" else None
+
+
+def _organization_link_from_soup(soup: BeautifulSoup) -> tuple[str | None, str | None]:
+    """Resolve org slug from breadcrumb, aside, or other /organization/&lt;slug&gt; links."""
+    candidates: list[tuple[str, str | None]] = []
+    selectors = (
+        'div[role="main"] ol.breadcrumb a[href^="/organization/"]',
+        'aside.secondary a[href^="/organization/"]',
+        'aside a[href^="/organization/"]',
+    )
+    for sel in selectors:
+        for a in soup.select(sel):
+            slug = _organization_slug_from_href(a.get("href") or "")
+            if not slug:
+                continue
+            display = a.get_text(strip=True) or None
+            img = a.select_one("img")
+            if (not display or len(display) < 2) and img and img.get("alt"):
+                display = img.get("alt")
+            candidates.append((slug, display))
+    if not candidates:
+        return None, None
+    for slug, display in reversed(candidates):
+        if display and len(display) > 1 and not display.lower().startswith("default "):
+            return slug, display
+    return candidates[-1][0], candidates[-1][1]
+
+
+def _dataset_page_contact_fallback(soup: BeautifulSoup) -> str | None:
+    """
+    Contact when org profile is missing or thin: Data.gov puts a Contact block
+    on many dataset pages (mailto / phone text). Also picks up obvious
+    'contact publisher' style links in the sidebar if present.
+    """
+    sec = soup.select_one("section.module-narrow.contact") or soup.select_one(
+        "aside section.contact"
+    )
+    if sec:
+        t = sec.get_text("\n", strip=True)
+        if t:
+            return t
+    aside = soup.select_one("aside.secondary") or soup.select_one("aside")
+    if aside:
+        for a in aside.select("a[href^='mailto:']"):
+            label = a.get_text(" ", strip=True)
+            href = (a.get("href") or "").strip()
+            if label and href:
+                return f"{label} ({href})"
+            if href:
+                return href
+        for a in aside.select("a[href]"):
+            text = a.get_text(" ", strip=True).lower()
+            title = (a.get("title") or "").lower()
+            if ("contact" in text and "publisher" in text) or (
+                "contact" in title and "publisher" in title
+            ):
+                return a.get_text(" ", strip=True) or a.get("href")
+    return None
 
 
 def _access_level_from_soup(soup: BeautifulSoup) -> str:
@@ -260,7 +354,8 @@ def parse_dataset_detail(html: str) -> dict[str, Any]:
         if t:
             tags.append(t)
 
-    org_slug, org_display = _breadcrumb_org(soup)
+    org_slug, org_display = _organization_link_from_soup(soup)
+    sidebar_contact = _dataset_page_contact_fallback(soup)
 
     resources: list[tuple[str | None, str]] = []
     for li in article.select("li.resource-item"):
@@ -293,13 +388,16 @@ def parse_dataset_detail(html: str) -> dict[str, Any]:
         "tags": tags,
         "org_slug": org_slug,
         "org_display_detail": org_display,
+        "sidebar_contact": sidebar_contact,
         "detail_resources": resources,
     }
 
 
 def parse_organization_page(html: str) -> dict[str, Any]:
     soup = BeautifulSoup(html, "html.parser")
-    info = soup.select_one("#organization-info .module-content")
+    info = soup.select_one("#organization-info .module-content") or soup.select_one(
+        ".context-info .module-content"
+    )
     org_type = None
     display_name = None
     description = None
@@ -319,9 +417,17 @@ def parse_organization_page(html: str) -> dict[str, Any]:
             if txt:
                 description = txt
                 break
+    if not display_name:
+        h = soup.select_one("#content h1.heading") or soup.select_one("h1.heading")
+        if h:
+            display_name = h.get_text(strip=True)
     contact_sec = soup.select_one("section.module-narrow.contact .module-content")
     if contact_sec:
         contact = contact_sec.get_text(" ", strip=True)
+    if not contact:
+        fb = _dataset_page_contact_fallback(soup)
+        if fb:
+            contact = fb
     return {
         "org_type": org_type,
         "display_name": display_name,
@@ -373,7 +479,7 @@ def ensure_organization(
             org_name,
             org_type,
             clip(description, 65535),
-            clip(contact, 45),
+            clip(contact, org_contact_max_len()),
         ),
     )
 
@@ -519,6 +625,13 @@ def export_table_csv(cur, table: str, out_dir: str) -> None:
 
 def run_crawl(populate_db: bool = True) -> None:
     max_pages = env_int("CRAWL_MAX_PAGES", 100)
+    resume_path = resume_ids_path()
+    processed: set[str] = load_processed_ids(resume_path) if resume_path else set()
+    if resume_path and processed:
+        print(
+            f"[resume] skipping {len(processed)} dataset(s) listed in {resume_path}",
+            flush=True,
+        )
     sess = session()
     listings: list[dict[str, Any]] = []
     for page in range(1, max_pages + 1):
@@ -538,11 +651,14 @@ def run_crawl(populate_db: bool = True) -> None:
     merged: list[dict[str, Any]] = []
 
     for i, item in enumerate(listings):
+        ds_id = item["identifier"]
+        if ds_id in processed:
+            continue
         org_slug: str | None = None
         from_breadcrumb = False
         detail_url = urljoin(BASE, item["detail_path"])
         print(
-            f"[detail] ({i+1}/{len(listings)}) {item['identifier']}",
+            f"[detail] ({i+1}/{len(listings)}) {ds_id}",
             flush=True,
         )
         html = fetch(sess, detail_url)
@@ -592,6 +708,8 @@ def run_crawl(populate_db: bool = True) -> None:
                 resources.append((fmt, u))
                 seen_u.add(u)
 
+        contact = oinfo.get("contact_information") or detail.get("sidebar_contact")
+
         row = {
             "identifier": item["identifier"],
             "dataset_name": detail.get("dataset_name") or item["dataset_name"],
@@ -608,7 +726,7 @@ def run_crawl(populate_db: bool = True) -> None:
             "_org_name_key": org_name_key,
             "_org_type": org_type,
             "_org_description": org_description,
-            "_contact": oinfo.get("contact_information"),
+            "_contact": contact,
         }
         merged.append(row)
 
@@ -636,7 +754,8 @@ def run_crawl(populate_db: bool = True) -> None:
     cur = conn.cursor()
     try:
         seen_orgs: set[str] = set()
-        for row in merged:
+
+        def flush_one_dataset(row: dict[str, Any]) -> None:
             oname = row["_org_name_key"]
             if oname not in seen_orgs:
                 ensure_organization(
@@ -647,8 +766,6 @@ def run_crawl(populate_db: bool = True) -> None:
                     row["_contact"],
                 )
                 seen_orgs.add(oname)
-
-        for row in merged:
             upsert_dataset(cur, row, row["_org_name_key"])
             for tag in row["tags"]:
                 t = clip(tag, 100)
@@ -662,16 +779,29 @@ def run_crawl(populate_db: bool = True) -> None:
                 fid = get_or_create_file_format(cur, fmt, url)
                 link_file_dataset(cur, fid, row["identifier"])
 
+        use_checkpoint = bool(resume_path)
+        for row in merged:
+            flush_one_dataset(row)
+            if use_checkpoint:
+                conn.commit()
+                append_processed_id(resume_path, row["identifier"])
+        if not use_checkpoint:
+            conn.commit()
+        print(
+            "[db] commit OK"
+            + (" (per-dataset checkpoint)" if use_checkpoint else ""),
+            flush=True,
+        )
+
         users_path = os.environ.get("USERS_CSV", "users.csv")
         if os.path.isfile(users_path):
             user_emails = load_users(cur, users_path)
-            ids = [r["identifier"] for r in merged]
+            cur.execute("SELECT identifier FROM Dataset")
+            ids = [r[0] for r in cur.fetchall()]
             seed_usage(cur, user_emails, ids, 500)
+            conn.commit()
         else:
             print(f"[warn] users file not found: {users_path}", file=sys.stderr)
-
-        conn.commit()
-        print("[db] commit OK")
 
         export_dir = os.environ.get("EXPORT_CSV_DIR", "export_csv")
         if export_dir:
