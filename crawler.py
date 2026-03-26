@@ -536,7 +536,22 @@ def link_dataset_tag(cur, dataset_id: str, tag_name: str) -> None:
     )
 
 
-def get_or_create_file_format(cur, fmt: str | None, url: str) -> int:
+def table_has_column(cur, table: str, column: str) -> bool:
+    cur.execute(
+        """
+        SELECT 1
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = %s
+          AND COLUMN_NAME = %s
+        LIMIT 1
+        """,
+        (table, column),
+    )
+    return cur.fetchone() is not None
+
+
+def get_or_create_file_format_m2m(cur, fmt: str | None, url: str) -> int:
     url = clip(url, 512) or ""
     cur.execute("SELECT format_id FROM FileFormat WHERE url = %s", (url,))
     r = cur.fetchone()
@@ -547,6 +562,26 @@ def get_or_create_file_format(cur, fmt: str | None, url: str) -> int:
         (clip(fmt, 45), url),
     )
     return int(cur.lastrowid)
+
+
+def ensure_file_format_weak_entity(
+    cur, fmt: str | None, url: str, dataset_id: str
+) -> None:
+    """
+    1:N / weak-entity design: FileFormat has a NOT NULL Dataset_identifier FK.
+    No junction table is needed/used.
+    """
+    url = clip(url, 512) or ""
+    cur.execute(
+        "SELECT format_id FROM FileFormat WHERE url = %s AND Dataset_identifier = %s",
+        (url, dataset_id),
+    )
+    if cur.fetchone():
+        return
+    cur.execute(
+        "INSERT INTO FileFormat (format_type, url, Dataset_identifier) VALUES (%s, %s, %s)",
+        (clip(fmt, 45), url, dataset_id),
+    )
 
 
 def link_file_dataset(cur, format_id: int, dataset_id: str) -> None:
@@ -571,11 +606,11 @@ def load_users(cur, path: str) -> list[str]:
             gender = clip(row.get("gender"), 45)
             birth = row.get("birthdate") or None
             country = clip(row.get("country"), 45)
-            cur.execute("SELECT email FROM User WHERE email = %s", (email,))
+            cur.execute("SELECT email FROM `User` WHERE email = %s", (email,))
             if not cur.fetchone():
                 cur.execute(
                     """
-                    INSERT INTO User (email, username, gender, birthdate, country)
+                    INSERT INTO `User` (email, username, gender, birthdate, country)
                     VALUES (%s, %s, %s, %s, %s)
                     """,
                     (email, username, gender, birth, country),
@@ -588,7 +623,7 @@ def seed_usage(cur, user_emails: list[str], dataset_ids: list[str], n: int = 500
     if not user_emails or not dataset_ids:
         return
     cats = ("analytics", "machine learning", "field research")
-    cur.execute("SELECT COUNT(*) FROM Usage")
+    cur.execute("SELECT COUNT(*) FROM `Usage`")
     start = cur.fetchone()[0]
     if start >= n:
         return
@@ -597,7 +632,7 @@ def seed_usage(cur, user_emails: list[str], dataset_ids: list[str], n: int = 500
     for _ in range(need):
         cur.execute(
             """
-            INSERT INTO Usage (project_name, project_category, User_email, Dataset_identifier)
+            INSERT INTO `Usage` (project_name, project_category, User_email, Dataset_identifier)
             VALUES (%s, %s, %s, %s)
             """,
             (
@@ -632,6 +667,25 @@ def run_crawl(populate_db: bool = True) -> None:
             f"[resume] skipping {len(processed)} dataset(s) listed in {resume_path}",
             flush=True,
         )
+    if populate_db:
+        # Fail fast if DB credentials are wrong, before spending ~1 hour crawling.
+        try:
+            test_conn = connect_db()
+            test_conn.close()
+        except mysql.connector.Error as e:
+            if e.errno == errorcode.ER_ACCESS_DENIED_ERROR:
+                print(
+                    "[error] MySQL access denied — check MYSQL_USER / MYSQL_PASSWORD",
+                    file=sys.stderr,
+                )
+            elif e.errno == errorcode.ER_BAD_DB_ERROR:
+                print(
+                    "[error] Database missing — create DataGov_DB first",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"[error] MySQL: {e}", file=sys.stderr)
+            sys.exit(1)
     sess = session()
     listings: list[dict[str, Any]] = []
     for page in range(1, max_pages + 1):
@@ -754,6 +808,12 @@ def run_crawl(populate_db: bool = True) -> None:
     cur = conn.cursor()
     try:
         seen_orgs: set[str] = set()
+        fileformat_is_weak = table_has_column(cur, "FileFormat", "Dataset_identifier")
+        if fileformat_is_weak:
+            print(
+                "[schema] Detected 1:N FileFormat (weak entity); skipping FileFormat_has_Dataset",
+                flush=True,
+            )
 
         def flush_one_dataset(row: dict[str, Any]) -> None:
             oname = row["_org_name_key"]
@@ -776,8 +836,11 @@ def run_crawl(populate_db: bool = True) -> None:
             for fmt, url in row["resources"]:
                 if not url:
                     continue
-                fid = get_or_create_file_format(cur, fmt, url)
-                link_file_dataset(cur, fid, row["identifier"])
+                if fileformat_is_weak:
+                    ensure_file_format_weak_entity(cur, fmt, url, row["identifier"])
+                else:
+                    fid = get_or_create_file_format_m2m(cur, fmt, url)
+                    link_file_dataset(cur, fid, row["identifier"])
 
         use_checkpoint = bool(resume_path)
         for row in merged:
