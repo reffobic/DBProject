@@ -85,13 +85,17 @@ CRAWL_MAX_PAGES=2 REQUEST_DELAY_SEC=0 python crawler.py --dry-run
 | `crawler.py` | Main crawler and DB loader |
 | `requirements.txt` | Python dependencies |
 | `users.csv` | Sample users for `User` / `Usage` seeding |
+| `sql/schema_datagov_db.sql` | **Base** Milestone I schema (run first on an empty server) |
 | `sql/alter_organization_contact_to_text.sql` | **Optional** migration: widen `contact_information` to `TEXT` |
+| `sql/view_user_with_age.sql` | **Optional** view: derived `age` from `birthdate` |
 
 ## Schema note
 
 `Organization.org_name` is limited to **45** characters in the provided schema. The crawler stores the organization **URL slug** (e.g. `exim-gov`) as `org_name` and keeps the full display name in `Organization.description` when available.
 
 `Organization.contact_information` as `VARCHAR(45)` truncates long mailto lines or URLs. If your instructor allows a small schema change, run the optional SQL migration above and set `ORG_CONTACT_MAX_LEN` accordingly so contact data is preserved.
+
+**Derived age:** The `User` table stores `birthdate` only (no `age` column). The crawler does not need to compute age. For the database design / Milestone III, apply `sql/view_user_with_age.sql` to add a `UserWithAge` view that exposes `TIMESTAMPDIFF(YEAR, birthdate, CURDATE()) AS age`.
 
 ## Rationale (Milestone feedback)
 
