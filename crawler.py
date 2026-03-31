@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Crawl catalog.data.gov (first N pages), parse with BeautifulSoup, populate DataGov_DB.
 
@@ -94,7 +93,7 @@ def append_processed_id(path: str, dataset_id: str) -> None:
 
 
 def sleep_polite() -> None:
-    time.sleep(env_float("REQUEST_DELAY_SEC", 1.0))
+    time.sleep(env_float("REQUEST_DELAY_SEC", 1.0)) #1 sec delay
 
 
 def session() -> requests.Session:
@@ -173,7 +172,7 @@ def parse_catalog_listing(html: str) -> list[dict[str, Any]]:
         if not href.startswith("/dataset/"):
             continue
         path = href.rstrip("/").split("/")
-        # /dataset/foo or /dataset/group/foo — take last segment as slug id
+
         identifier = path[-1] if path else ""
         if not identifier or identifier == "dataset":
             continue
