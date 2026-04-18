@@ -10,5 +10,10 @@ __pycache__/
 .env
 .env.*
 export_csv/
+export_csv.zip
 processed_ids.txt
 *.log
+
+# Large DB dumps (submit via course portal / Drive; do not commit to Git)
+DataGov_DB_aiven*.sql
+DataGov_DB_dump*.sql

@@ -1,33 +1,45 @@
-# Data.gov Catalog Crawler
+# DataGov Crawler & DB Client — CSCE 2501
 
-Python crawler for [catalog.data.gov](https://catalog.data.gov/dataset/) that parses HTML with **BeautifulSoup**, loads results into **MySQL** (`DataGov_DB`), and exports table dumps as CSV. Built for **CSCE 2501 — Milestone II** (database population from Data.gov).
+Python tools for **US catalog.data.gov** datasets: a **BeautifulSoup** crawler that populates **MySQL** (`DataGov_DB`), plus a **Streamlit** web client (**Milestone III**) for queries and transactions against a **remote** database (e.g. Aiven).
 
-## Features
+---
 
-- Crawls catalog listing pages (`/dataset/?page=1` … `page=N`, default **100** pages, **20** datasets per page).
-- For each dataset: fetches the detail page and (when available) the **organization** profile page from the breadcrumb.
-- Extracts identifiers, names, organizations, access level, license, metadata dates, publisher, maintainer, topic (when present), tags, and file formats with download URLs.
-- Inserts into `Organization`, `Dataset`, `tag`, `Dataset_has_tag`, `FileFormat`, and `FileFormat_has_Dataset` (organizations are **skipped if they already exist**).
-- Loads users from `users.csv` and seeds up to **500** random `Usage` rows.
-- **Polite crawling:** configurable delay after **each** HTTP request (default **1 second**).
-- **Resume / checkpoint:** optional `processed_ids.txt` skips already-imported datasets and commits **per dataset** so a dropped connection does not force a full re-crawl.
-- **Organization & contact fallbacks:** org slug is resolved from breadcrumb **or** sidebar links; contact text is taken from the org profile when possible, otherwise from the dataset page **Contact** block (mailto / phone) or obvious “contact publisher” sidebar links.
+## Repository layout
+
+| Path | Purpose |
+|------|---------|
+| `crawler.py` | Milestone II: crawl, parse, load MySQL, export CSVs |
+| `milestone3_app/app.py` | Milestone III: Streamlit UI |
+| `milestone3_app/db.py` | MySQL connection (TLS for remote hosts) |
+| `milestone3_app/run_milestone3.sh` | Launcher script (optional) |
+| `requirements.txt` | All Python dependencies (crawler + app) |
+| `users.csv` | Seed users for `User` / `Usage` |
+| `sql/` | Schema, optional migrations, `UserWithAge` view |
+
+**Course deliverables not stored in Git:** full **SQL dumps** (often tens of MB) and **video** — submit those through the LMS / Drive as instructed. Keep dumps **out of this repo** (see `.gitignore`); generate them locally when needed.
+
+---
 
 ## Requirements
 
-- Python 3.9+ recommended (3.7+ may work with the pinned dependencies).
-- MySQL server with schema **`DataGov_DB`** already created (see your course SQL script).
-
-## Setup
+- **Milestone II (crawler):** Python **3.9+** (3.11 recommended).
+- **Milestone III (Streamlit):** Python **3.11+** (Streamlit and pandas 2.x do not install on 3.7).
 
 ```bash
 cd DataGov_Crawler
-python3 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+python3.11 -m venv .venv311
+source .venv311/bin/activate          # Windows: .venv311\Scripts\activate
+pip install -U pip
 pip install -r requirements.txt
 ```
 
-Create the database and tables in MySQL (your Milestone I script), then set connection variables if needed:
+---
+
+## Milestone II — Crawler
+
+Crawls catalog pages (`/dataset/?page=1` … `page=N`, default **100** pages × **20** datasets), parses dataset and organization pages, loads `Organization`, `Dataset`, tags, file formats, users from `users.csv`, and seeds **500** `Usage` rows. **Resume:** `processed_ids.txt` (gitignored). **Rate limit:** `REQUEST_DELAY_SEC` (default 1s).
+
+### Crawler environment variables
 
 | Variable | Default |
 |----------|---------|
@@ -36,10 +48,14 @@ Create the database and tables in MySQL (your Milestone I script), then set conn
 | `MYSQL_USER` | `root` |
 | `MYSQL_PASSWORD` | *(empty)* |
 | `MYSQL_DATABASE` | `DataGov_DB` |
+| `CRAWL_MAX_PAGES` | `100` |
+| `REQUEST_DELAY_SEC` | `1.0` |
+| `USERS_CSV` | `users.csv` |
+| `EXPORT_CSV_DIR` | `export_csv` (empty = skip export) |
+| `PROCESSED_IDS_FILE` | `processed_ids.txt` (empty = disable resume) |
+| `ORG_CONTACT_MAX_LEN` | `45` (raise after optional `TEXT` migration) |
 
-## Usage
-
-**Full crawl** (100 catalog pages, populate DB, write CSVs under `export_csv/`):
+### Run crawler
 
 ```bash
 export MYSQL_USER=your_user
@@ -47,79 +63,68 @@ export MYSQL_PASSWORD=your_password
 python crawler.py
 ```
 
-**Dry run** (no database; checks parsing and network only):
+Dry run (no DB): `python crawler.py --dry-run`
+
+Schema SQL: `sql/schema_datagov_db.sql`. Optional: `sql/alter_organization_contact_to_text.sql`, `sql/view_user_with_age.sql`.
+
+---
+
+## Milestone III — Streamlit app (remote MySQL)
+
+The app must use your **hosted** database (e.g. **Aiven**), not only `localhost`, for the course demo.
+
+### Environment variables
+
+| Variable | Example (Aiven) |
+|----------|------------------|
+| `MYSQL_HOST` | `mysql-xxxxx.g.aivencloud.com` |
+| `MYSQL_PORT` | `17976` |
+| `MYSQL_USER` | `avnadmin` |
+| `MYSQL_PASSWORD` | *(from Aiven; never commit)* |
+| `MYSQL_DATABASE` | `DataGov_DB` |
+| `MYSQL_SSL_CA` | `/full/path/to/ca.pem` |
+
+**Local MySQL without TLS:** omit `MYSQL_SSL_CA` and set `MYSQL_SSL_DISABLED=true`.
+
+### Run app (executable)
+
+There is no separate `.exe`. After exports:
 
 ```bash
-python crawler.py --dry-run
+cd DataGov_Crawler
+source .venv311/bin/activate
+export MYSQL_HOST=... MYSQL_PORT=... MYSQL_USER=... MYSQL_PASSWORD=... MYSQL_DATABASE=DataGov_DB MYSQL_SSL_CA=/path/to/ca.pem
+streamlit run milestone3_app/app.py
 ```
 
-**Faster local testing** (fewer pages, no delay):
+Or: `chmod +x milestone3_app/run_milestone3.sh` once, then `./milestone3_app/run_milestone3.sh` (same `export` lines first).
+
+### Export a dump from Aiven (for submission)
 
 ```bash
-CRAWL_MAX_PAGES=2 REQUEST_DELAY_SEC=0 python crawler.py --dry-run
+mysqldump \
+  -h YOUR_AIVEN_HOST -P YOUR_PORT -u avnadmin -p \
+  --ssl-mode=VERIFY_CA --ssl-ca=/path/to/ca.pem \
+  --single-transaction --routines --events --triggers \
+  --set-gtid-purged=OFF \
+  DataGov_DB > ~/DataGov_DB_aiven_milestone3.sql
 ```
 
-### Optional environment variables
+Sanity check: `grep -m 1 "CREATE TABLE"` and `grep -m 1 "INSERT INTO"` on that file. **Store the file outside Git** or upload only to the course system.
 
-| Variable | Description |
-|----------|-------------|
-| `CRAWL_MAX_PAGES` | Number of catalog pages (default `100`). |
-| `REQUEST_DELAY_SEC` | Seconds to sleep after each HTTP request (default `1.0`). |
-| `USERS_CSV` | Path to users CSV (default `users.csv`). |
-| `EXPORT_CSV_DIR` | Directory for exported table CSVs (default `export_csv`). Set to empty to skip export. |
-| `PROCESSED_IDS_FILE` | Path to checkpoint file (default `processed_ids.txt`). Set to **empty** to disable resume. The file is gitignored. |
-| `ORG_CONTACT_MAX_LEN` | Max length stored for `Organization.contact_information` (default `45`, matching the original schema). After applying `sql/alter_organization_contact_to_text.sql`, set e.g. `65535`. |
+---
 
-### Resume after an interrupted crawl
+## Schema notes
 
-1. Leave `PROCESSED_IDS_FILE` at its default (or point it to your own path).
-2. Re-run `python crawler.py`. Identifiers already listed in the file are **not** fetched again; each newly stored dataset is appended to the file after a successful DB commit.
-3. For a **full** re-import from scratch, delete `processed_ids.txt` (and truncate or drop populated tables if you need a clean DB).
+- `Organization.org_name` is `VARCHAR(45)`; the crawler stores the org **slug** as `org_name`. Optional `TEXT` migration for long contacts: `sql/alter_organization_contact_to_text.sql`.
+- **Derived age:** `sql/view_user_with_age.sql` — base `User` table uses `birthdate` only.
 
-`Usage` seeding uses **all** rows in `Dataset` after the crawl, not only the current batch.
+---
 
-## Project layout
+## GitHub
 
-| File | Purpose |
-|------|---------|
-| `crawler.py` | Main crawler and DB loader |
-| `requirements.txt` | Python dependencies |
-| `users.csv` | Sample users for `User` / `Usage` seeding |
-| `sql/schema_datagov_db.sql` | **Base** Milestone I schema (run first on an empty server) |
-| `sql/alter_organization_contact_to_text.sql` | **Optional** migration: widen `contact_information` to `TEXT` |
-| `sql/view_user_with_age.sql` | **Optional** view: derived `age` from `birthdate` |
-
-## Schema note
-
-`Organization.org_name` is limited to **45** characters in the provided schema. The crawler stores the organization **URL slug** (e.g. `exim-gov`) as `org_name` and keeps the full display name in `Organization.description` when available.
-
-`Organization.contact_information` as `VARCHAR(45)` truncates long mailto lines or URLs. If your instructor allows a small schema change, run the optional SQL migration above and set `ORG_CONTACT_MAX_LEN` accordingly so contact data is preserved.
-
-**Derived age:** The `User` table stores `birthdate` only (no `age` column). The crawler does not need to compute age. For the database design / Milestone III, apply `sql/view_user_with_age.sql` to add a `UserWithAge` view that exposes `TIMESTAMPDIFF(YEAR, birthdate, CURDATE()) AS age`.
-
-## Rationale (Milestone feedback)
-
-These ideas align well with a production-style crawler:
-
-- **Richer org / contact extraction** — Required by the project (“about” pages) and brittle in the wild; fallbacks on the dataset page reduce empty `Organization` rows.
-- **Resume checkpoints** — Essential for long runs (100 pages + 2,000 detail requests + delays). The file-based list is simple to inspect and delete when you need a full reset.
-- **TEXT for contact** — Good data modeling; keep the original `VARCHAR(45)` if the rubric forbids DDL changes, otherwise prefer `TEXT` plus a higher `ORG_CONTACT_MAX_LEN`.
-
-## Remote repository
-
-This folder is a **Git** repository. To publish it (for example on GitHub):
-
-1. Create a **new empty** repository on GitHub (no README/license there if you want a clean history).
-2. From this directory:
-
-```bash
-git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPO.git
-git branch -M main
-git push -u origin main
-```
-
-Do not commit real database passwords; use environment variables or a local `.env` file that stays **untracked** (`.env` is listed in `.gitignore`).
+Remote: configure `origin` and push `main` as usual. **Never commit** real passwords, `ca.pem` secrets, or large `DataGov_DB*.sql` dumps (see `.gitignore`).
 
 ## License
 
-Course / educational use. Data.gov content is subject to [data.gov policies](https://data.gov/).
+Course / educational use. Data.gov content follows [data.gov policies](https://data.gov/).
