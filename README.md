@@ -1,45 +1,44 @@
-# DataGov Crawler & DB Client — CSCE 2501
+# DataGov Catalog — Database System (CSCE 2501)
 
-Python tools for **US catalog.data.gov** datasets: a **BeautifulSoup** crawler that populates **MySQL** (`DataGov_DB`), plus a **Streamlit** web client (**Milestone III**) for queries and transactions against a **remote** database (e.g. Aiven).
-
----
-
-## Repository layout
-
-| Path | Purpose |
-|------|---------|
-| `crawler.py` | Milestone II: crawl, parse, load MySQL, export CSVs |
-| `milestone3_app/app.py` | Milestone III: Streamlit UI |
-| `milestone3_app/db.py` | MySQL connection (TLS for remote hosts) |
-| `milestone3_app/run_milestone3.sh` | Launcher script (optional) |
-| `requirements.txt` | All Python dependencies (crawler + app) |
-| `users.csv` | Seed users for `User` / `Usage` |
-| `sql/` | Schema, optional migrations, `UserWithAge` view |
-
-**Course deliverables not stored in Git:** full **SQL dumps** (often tens of MB) and **video** — submit those through the LMS / Drive as instructed. Keep dumps **out of this repo** (see `.gitignore`); generate them locally when needed.
+This repository contains a Python **web crawler** that collects dataset metadata from [catalog.data.gov](https://catalog.data.gov/dataset/), loads it into a **MySQL** schema (`DataGov_DB`), and a **Streamlit** client application for interactive access to that database over a **remote** MySQL deployment.
 
 ---
 
-## Requirements
+## Contents
 
-- **Milestone II (crawler):** Python **3.9+** (3.11 recommended).
-- **Milestone III (Streamlit):** Python **3.11+** (Streamlit and pandas 2.x do not install on 3.7).
+| Path | Description |
+|------|-------------|
+| `crawler.py` | Crawler: HTTP fetch, HTML parsing, database load, optional CSV export |
+| `milestone3_app/app.py` | Client application (Streamlit) |
+| `milestone3_app/db.py` | Database connection (TLS when `MYSQL_SSL_CA` is set) |
+| `milestone3_app/run_milestone3.sh` | Optional launcher |
+| `requirements.txt` | Python dependencies |
+| `users.csv` | Input file for seeding the `User` table and random `Usage` rows |
+| `sql/` | DDL scripts: base schema, optional `Organization.contact_information` alteration, `UserWithAge` view |
+
+Large **SQL dump** files and the **demonstration recording** are not version-controlled; submit those according to the course instructions.
+
+---
+
+## Environment
+
+- **Crawler:** Python 3.9 or newer (3.11 recommended).
+- **Client application:** Python 3.11 or newer (required for the current Streamlit and pandas versions).
 
 ```bash
-cd DataGov_Crawler
 python3.11 -m venv .venv311
-source .venv311/bin/activate          # Windows: .venv311\Scripts\activate
+source .venv311/bin/activate
 pip install -U pip
 pip install -r requirements.txt
 ```
 
 ---
 
-## Milestone II — Crawler
+## Milestone II — Data population (`crawler.py`)
 
-Crawls catalog pages (`/dataset/?page=1` … `page=N`, default **100** pages × **20** datasets), parses dataset and organization pages, loads `Organization`, `Dataset`, tags, file formats, users from `users.csv`, and seeds **500** `Usage` rows. **Resume:** `processed_ids.txt` (gitignored). **Rate limit:** `REQUEST_DELAY_SEC` (default 1s).
+The crawler requests catalog listing pages (`/dataset/?page=1` … `page=N`, default 100 pages, 20 datasets per page), follows dataset detail pages and organization pages where available, and inserts into `Organization`, `Dataset`, `tag`, `Dataset_has_tag`, `FileFormat`, and the relationship table linking formats to datasets (schema-dependent). It loads rows from `users.csv` into `User` and inserts up to **500** random rows into `Usage`. Request spacing is controlled by `REQUEST_DELAY_SEC` (default 1 second). Completed dataset identifiers may be recorded in `processed_ids.txt` for resumable runs (file is listed in `.gitignore`).
 
-### Crawler environment variables
+### Variables (crawler)
 
 | Variable | Default |
 |----------|---------|
@@ -51,80 +50,70 @@ Crawls catalog pages (`/dataset/?page=1` … `page=N`, default **100** pages × 
 | `CRAWL_MAX_PAGES` | `100` |
 | `REQUEST_DELAY_SEC` | `1.0` |
 | `USERS_CSV` | `users.csv` |
-| `EXPORT_CSV_DIR` | `export_csv` (empty = skip export) |
-| `PROCESSED_IDS_FILE` | `processed_ids.txt` (empty = disable resume) |
-| `ORG_CONTACT_MAX_LEN` | `45` (raise after optional `TEXT` migration) |
-
-### Run crawler
+| `EXPORT_CSV_DIR` | `export_csv` (empty string skips CSV export) |
+| `PROCESSED_IDS_FILE` | `processed_ids.txt` (empty string disables resume) |
+| `ORG_CONTACT_MAX_LEN` | `45` |
 
 ```bash
-export MYSQL_USER=your_user
-export MYSQL_PASSWORD=your_password
+export MYSQL_USER=...
+export MYSQL_PASSWORD=...
 python crawler.py
 ```
 
-Dry run (no DB): `python crawler.py --dry-run`
+Dry run (no database writes): `python crawler.py --dry-run`
 
-Schema SQL: `sql/schema_datagov_db.sql`. Optional: `sql/alter_organization_contact_to_text.sql`, `sql/view_user_with_age.sql`.
+Apply `sql/schema_datagov_db.sql` on the server before the first crawl. Optional scripts: `sql/alter_organization_contact_to_text.sql`, `sql/view_user_with_age.sql`.
 
 ---
 
-## Milestone III — Streamlit app (remote MySQL)
+## Milestone III — Application layer (`milestone3_app`)
 
-The app must use your **hosted** database (e.g. **Aiven**), not only `localhost`, for the course demo.
+The client connects to MySQL using the variables below. For providers that require TLS, set `MYSQL_SSL_CA` to the service CA certificate path.
 
-### Environment variables
+### Variables (application)
 
-| Variable | Example (Aiven) |
-|----------|------------------|
-| `MYSQL_HOST` | `mysql-xxxxx.g.aivencloud.com` |
-| `MYSQL_PORT` | `17976` |
-| `MYSQL_USER` | `avnadmin` |
-| `MYSQL_PASSWORD` | *(from Aiven; never commit)* |
-| `MYSQL_DATABASE` | `DataGov_DB` |
-| `MYSQL_SSL_CA` | `/full/path/to/ca.pem` |
+| Variable | Description |
+|----------|-------------|
+| `MYSQL_HOST` | Server hostname |
+| `MYSQL_PORT` | TCP port |
+| `MYSQL_USER` | Account name |
+| `MYSQL_PASSWORD` | Account password |
+| `MYSQL_DATABASE` | Database name (e.g. `DataGov_DB`) |
+| `MYSQL_SSL_CA` | Path to CA bundle (TLS) |
+| `MYSQL_SSL_DISABLED` | Set to `true` only for local servers without TLS |
 
-**Local MySQL without TLS:** omit `MYSQL_SSL_CA` and set `MYSQL_SSL_DISABLED=true`.
-
-### Run app (executable)
-
-There is no separate `.exe`. After exports:
+### Run
 
 ```bash
-cd DataGov_Crawler
 source .venv311/bin/activate
 export MYSQL_HOST=... MYSQL_PORT=... MYSQL_USER=... MYSQL_PASSWORD=... MYSQL_DATABASE=DataGov_DB MYSQL_SSL_CA=/path/to/ca.pem
 streamlit run milestone3_app/app.py
 ```
 
-Or: `chmod +x milestone3_app/run_milestone3.sh` once, then `./milestone3_app/run_milestone3.sh` (same `export` lines first).
+Optional: `chmod +x milestone3_app/run_milestone3.sh` then `./milestone3_app/run_milestone3.sh` after the same exports.
 
-### Export a dump from Aiven (for submission)
+Streamlit is the runnable entry point (no separate compiled binary).
+
+### Logical backup (`mysqldump`)
 
 ```bash
-mysqldump \
-  -h YOUR_AIVEN_HOST -P YOUR_PORT -u avnadmin -p \
+mysqldump -h HOST -P PORT -u USER -p \
   --ssl-mode=VERIFY_CA --ssl-ca=/path/to/ca.pem \
   --single-transaction --routines --events --triggers \
   --set-gtid-purged=OFF \
-  DataGov_DB > ~/DataGov_DB_aiven_milestone3.sql
+  DataGov_DB > DataGov_DB_backup.sql
 ```
-
-Sanity check: `grep -m 1 "CREATE TABLE"` and `grep -m 1 "INSERT INTO"` on that file. **Store the file outside Git** or upload only to the course system.
 
 ---
 
 ## Schema notes
 
-- `Organization.org_name` is `VARCHAR(45)`; the crawler stores the org **slug** as `org_name`. Optional `TEXT` migration for long contacts: `sql/alter_organization_contact_to_text.sql`.
-- **Derived age:** `sql/view_user_with_age.sql` — base `User` table uses `birthdate` only.
+`Organization.org_name` is defined as `VARCHAR(45)` in the provided schema; the crawler stores a stable organization key compatible with that length. Longer contact strings may be stored fully if `sql/alter_organization_contact_to_text.sql` is applied and `ORG_CONTACT_MAX_LEN` is increased accordingly.
+
+The `User` table stores `birthdate`; derived age can be exposed through `sql/view_user_with_age.sql`.
 
 ---
 
-## GitHub
-
-Remote: configure `origin` and push `main` as usual. **Never commit** real passwords, `ca.pem` secrets, or large `DataGov_DB*.sql` dumps (see `.gitignore`).
-
 ## License
 
-Course / educational use. Data.gov content follows [data.gov policies](https://data.gov/).
+Educational use. Dataset listings originate from [data.gov](https://data.gov/); refer to their terms of use.

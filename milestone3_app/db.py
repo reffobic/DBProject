@@ -1,4 +1,4 @@
-"""MySQL connection helpers for Milestone III (remote Aiven + optional local)."""
+"""MySQL connection for the Streamlit application."""
 
 from __future__ import annotations
 
@@ -38,17 +38,16 @@ def connect():
     if ssl_ca and Path(ssl_ca).expanduser().exists():
         params["ssl_ca"] = str(Path(ssl_ca).expanduser())
     elif host not in ("127.0.0.1", "localhost", "::1") and not ssl_disabled:
-        # Remote hosts (e.g. Aiven) typically require TLS; fail clearly if CA missing.
         raise RuntimeError(
-            "MYSQL_SSL_CA is not set or the file does not exist. "
-            "For Aiven, download ca.pem and export MYSQL_SSL_CA=/path/to/ca.pem"
+            "TLS is required for this host: set MYSQL_SSL_CA to a readable CA certificate path, "
+            "or set MYSQL_SSL_DISABLED=true for local development only."
         )
 
     return mysql.connector.connect(**params)
 
 
 def fileformat_has_dataset_column(cur) -> bool:
-    """True if FileFormat rows are tied to Dataset via Dataset_identifier (weak entity)."""
+    """Return whether `FileFormat` includes a `Dataset_identifier` column."""
     cur.execute(
         """
         SELECT COUNT(*) FROM information_schema.COLUMNS

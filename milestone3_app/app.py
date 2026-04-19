@@ -1,8 +1,4 @@
-"""
-Milestone III — DataGov_DB client (Streamlit).
-
-Connects via mysql-connector-python. For Aiven, set MYSQL_SSL_CA to your ca.pem path.
-"""
+"""Streamlit front-end for the DataGov_DB MySQL application."""
 
 from __future__ import annotations
 
@@ -74,8 +70,8 @@ def _fileformat_join_fragment(weak: bool) -> str:
 
 def main() -> None:
     st.set_page_config(page_title="DataGov DB Client", layout="wide")
-    st.title("DataGov — Milestone III Client")
-    st.caption("Uses `MYSQL_*` environment variables (remote DB required for submission).")
+    st.title("DataGov Database Client")
+    st.caption("Database settings are read from `MYSQL_*` environment variables.")
 
     with st.sidebar:
         st.subheader("Connection")
@@ -102,12 +98,6 @@ def main() -> None:
     except Exception as e:
         st.error(f"Database connection failed: {e}")
         st.stop()
-
-    st.info(
-        "Schema: FileFormat is **weak entity** (Dataset on FileFormat)."
-        if weak_ff
-        else "Schema: FileFormat linked via **FileFormat_has_Dataset**."
-    )
 
     menu = st.selectbox(
         "Choose action",
@@ -226,7 +216,7 @@ def main() -> None:
                 (org_type,),
             )
             st.dataframe(df, use_container_width=True)
-            st.caption("Showing up to 500 rows. Export from DB tools if you need the full list.")
+            st.caption("Results limited to 500 rows.")
 
     elif menu == "Top 5 organizations by dataset count":
         st.subheader("Top 5 contributing organizations")
